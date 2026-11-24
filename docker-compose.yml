@@ -1,0 +1,33 @@
+name: medical-diagnostics
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: ${BACKEND_IMAGE:-medical-diagnostics-backend:local}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      VECTOR_DB_PATH: /app/vector_db
+    volumes:
+      - vector_db:/app/vector_db
+    ports:
+      - "8000:8000" # direct API access + Swagger docs at /api/v1/docs
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: ${FRONTEND_IMAGE:-medical-diagnostics-frontend:local}
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  vector_db:
