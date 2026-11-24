@@ -1,38 +1,25 @@
-from typing import Protocol
+"""Store text chunks as embeddings in a local Chroma database and search them."""
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 
-from app.core.config import Settings
+from app.config import Config
 
 
-class VectorStore(Protocol):
-    def add_documents(self, documents: list[Document]) -> int: ...
-
-    def similarity_search(self, query: str, k: int) -> list[Document]: ...
-
-
-class ChromaVectorStore:
-    """Persistent Chroma collection backed by OpenAI embeddings."""
-
-    def __init__(self, settings: Settings) -> None:
-        settings.vector_db_path.mkdir(parents=True, exist_ok=True)
+class VectorStore:
+    def __init__(self):
         embeddings = OpenAIEmbeddings(
-            model=settings.openai_embedding_model,
-            api_key=settings.openai_api_key,
+            model=Config.OPENAI_EMBEDDING_MODEL, api_key=Config.OPENAI_API_KEY
         )
-        self._store = Chroma(
-            collection_name=settings.collection_name,
+        self.db = Chroma(
+            collection_name="medical_documents",
             embedding_function=embeddings,
-            persist_directory=str(settings.vector_db_path),
+            persist_directory=Config.VECTOR_DB_PATH,
         )
 
-    def add_documents(self, documents: list[Document]) -> int:
-        if not documents:
-            return 0
-        self._store.add_documents(documents)
-        return len(documents)
+    def add_documents(self, chunks: list[Document]) -> None:
+        self.db.add_documents(chunks)
 
-    def similarity_search(self, query: str, k: int) -> list[Document]:
-        return self._store.similarity_search(query, k=k)
+    def search(self, question: str, k: int = 4) -> list[Document]:
+        return self.db.similarity_search(question, k=k)

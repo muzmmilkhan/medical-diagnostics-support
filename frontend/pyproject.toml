@@ -1,0 +1,12 @@
+[project]
+name = "frontend"
+version = "0.1.0"
+description = "Streamlit UI for the Medical Diagnostics Support Application"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "streamlit",
+    "requests",
+]
+
+[tool.uv]
+package = false

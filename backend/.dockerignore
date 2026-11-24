@@ -1,8 +1,4 @@
 .venv
 __pycache__
-*.pyc
-.pytest_cache
-.ruff_cache
-.env
 vector_db
-tests
+.env

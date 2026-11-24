@@ -1,32 +1,27 @@
+# Local:  docker compose up --build      -> app at http://localhost:8501, API docs at http://localhost:8000/docs
+# On AWS the GitHub workflow sets ECR_REGISTRY and IMAGE_TAG so the images are named for Amazon ECR.
 name: medical-diagnostics
 
 services:
   backend:
-    build:
-      context: ./backend
-    image: ${BACKEND_IMAGE:-medical-diagnostics-backend:local}
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      VECTOR_DB_PATH: /app/vector_db
+    build: ./backend
+    image: ${ECR_REGISTRY:-local}/medical-diagnostics-backend:${IMAGE_TAG:-latest}
+    env_file: .env
     volumes:
-      - vector_db:/app/vector_db
+      - vector_db:/app/vector_db # keeps the uploaded documents' embeddings between restarts
     ports:
-      - "${BACKEND_PORT:-8000}:8000" # direct API access + Swagger docs at /api/v1/docs
+      - "8000:8000"
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ./frontend
-    image: ${FRONTEND_IMAGE:-medical-diagnostics-frontend:local}
+    build: ./frontend
+    image: ${ECR_REGISTRY:-local}/medical-diagnostics-frontend:${IMAGE_TAG:-latest}
     environment:
       BACKEND_URL: http://backend:8000
     ports:
-      - "${FRONTEND_PORT:-8080}:8080"
+      - "8501:8501"
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     restart: unless-stopped
 
 volumes:

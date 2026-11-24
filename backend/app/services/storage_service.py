@@ -1,38 +1,17 @@
-import logging
-from pathlib import Path
+"""Save the original uploaded file to S3 (only if S3_BUCKET_NAME is set)."""
 
 import boto3
 
-from app.core.config import Settings
-
-logger = logging.getLogger(__name__)
+from app.config import Config
 
 
-class S3StorageService:
-    def __init__(self, bucket: str, client) -> None:
-        self._bucket = bucket
-        self._client = client
+class S3Storage:
+    def __init__(self):
+        self.bucket = Config.S3_BUCKET_NAME
+        self.s3 = boto3.client("s3", region_name=Config.AWS_REGION) if self.bucket else None
 
-    @classmethod
-    def from_settings(cls, settings: Settings) -> "S3StorageService | None":
-        """Return a storage service, or None when no bucket is configured."""
-        if not settings.s3_bucket_name:
-            return None
-        # Falls back to boto3's default credential chain (env, profile, IAM role) when unset.
-        client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=(
-                settings.aws_secret_access_key.get_secret_value()
-                if settings.aws_secret_access_key
-                else None
-            ),
-            region_name=settings.aws_region,
-        )
-        return cls(settings.s3_bucket_name, client)
-
-    def upload(self, content: bytes, filename: str) -> str:
-        key = f"uploads/{Path(filename).name}"
-        self._client.put_object(Bucket=self._bucket, Key=key, Body=content)
-        logger.info("Uploaded %s to s3://%s/%s", filename, self._bucket, key)
-        return key
+    def upload(self, content: bytes, filename: str) -> bool:
+        if not self.s3:
+            return False
+        self.s3.put_object(Bucket=self.bucket, Key=f"uploads/{filename}", Body=content)
+        return True

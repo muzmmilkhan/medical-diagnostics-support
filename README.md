@@ -1,120 +1,130 @@
-# Medical Diagnostics Support Application
+# Medical Diagnostics Support Application (demo)
 
-Retrieval-augmented Q&A over clinical reference documents. Upload PDFs or text files, which are chunked,
-embedded with OpenAI and stored in a persistent Chroma vector store. Then ask questions whose answers
-are grounded in those documents, with sources cited.
+Upload medical documents (PDF or TXT), then ask questions about them. The answers come from an LLM
+that only uses the content of your documents. This technique is called **RAG** (Retrieval-Augmented Generation).
 
-| Part       | Stack                                                                  |
-| ---------- | ---------------------------------------------------------------------- |
-| `backend/` | FastAPI · LangChain · Chroma · OpenAI · optional S3 archival · **uv** |
-| `frontend/`| React 19 · TypeScript · Vite, served by nginx in production            |
-| Infra      | Dockerfiles per service · Docker Compose · GitHub Actions CI/CD → AWS ECR + EC2 |
+## How it works
+
+```
+ Streamlit UI  ──HTTP──►  FastAPI backend  ──►  OpenAI (embeddings + chat)
+ (frontend)               │
+                          ├──► Chroma vector DB   (stores document chunks)
+                          └──► Amazon S3          (stores the original files)
+```
+
+1. **Upload:** the backend splits the file into chunks, turns each chunk into an embedding
+   (a list of numbers that captures its meaning), and saves them in Chroma. The original file goes to S3.
+2. **Ask:** the backend finds the chunks most similar to the question and sends them, with the question, to the LLM.
+   The LLM writes the answer from those chunks.
 
 ## Project structure
 
 ```
-.
-├── backend/
-│   ├── app/
-│   │   ├── main.py                 # app factory: CORS, routers, lifespan
-│   │   ├── core/                   # config (pydantic-settings), logging
-│   │   ├── api/
-│   │   │   ├── deps.py             # dependency injection (services, settings)
-│   │   │   └── v1/routes/          # health, documents, query
-│   │   ├── schemas/                # request/response models
-│   │   └── services/               # document_processor, vector_store, rag_service, storage_service
-│   ├── tests/                      # pytest; fakes for vector store + LLM (no API key needed)
-│   ├── pyproject.toml / uv.lock
-│   └── Dockerfile
-├── frontend/
-│   ├── src/{api,components,test}/
-│   ├── nginx.conf.template         # serves SPA, proxies /api -> backend
-│   └── Dockerfile
-├── data/Diabetes.pdf               # sample document
-├── deploy/                       # AWS: prod compose, bootstrap (ECR/S3/IAM), EC2 setup, GitHub secrets
-├── docker-compose.yml
-├── .env.example
-└── .github/workflows/{ci,cd}.yml
+backend/                      FastAPI API (managed with uv)
+  app/main.py                 creates the app
+  app/routes.py               the endpoints: /health, /upload, /query
+  app/config.py               settings from environment variables
+  app/services/
+    document_loader.py        PDF/TXT -> text chunks
+    vector_store.py           save and search chunks in Chroma
+    llm_service.py            answer questions with OpenAI
+    storage_service.py        save uploaded files to S3
+  Dockerfile
+frontend/                     Streamlit UI (managed with uv)
+  app.py
+  Dockerfile
+docker-compose.yml            runs backend + frontend together
+.github/workflows/deploy.yml  CI/CD: build, push to ECR, run on EC2
+data/Diabetes.pdf             sample document to try
 ```
 
-## API
-
-All routes are under `/api/v1`. Interactive docs are at `/api/v1/docs`.
-
-| Method | Path         | Description                                                    |
-| ------ | ------------ | -------------------------------------------------------------- |
-| GET    | `/health`    | Liveness check                                                 |
-| POST   | `/documents` | Multipart `file` (.pdf/.txt). Chunks, indexes, optionally archives to S3 |
-| POST   | `/query`     | `{ "question": str, "history": [{role, content}] }` → `{ answer, sources }` |
-
-## Configuration
+## Run locally
 
 ```bash
-cp .env.example .env   # then set OPENAI_API_KEY (and optional S3 settings)
+cp .env.example .env          # then put your OPENAI_API_KEY in .env
 ```
 
-The backend reads `.env` from the repo root (or `backend/`). Legacy variable names from the original
-Flask app (`AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AWS_BUCKET_NAME`) are still accepted.
-
-## Run with Docker Compose
+**With Docker:**
 
 ```bash
 docker compose up --build
 ```
 
-- App: http://localhost:8080
-- API docs: http://localhost:8000/api/v1/docs
-
-The vector store is kept in the `vector_db` named volume. Run `docker compose down -v` to wipe it.
-
-## Local development (uv + Vite)
-
-Prerequisites: [uv](https://docs.astral.sh/uv/) and Node 22 or later.
+**Without Docker** (needs [uv](https://docs.astral.sh/uv/)), in two terminals:
 
 ```bash
-# Backend: uv installs Python 3.12 and all deps into backend/.venv
-cd backend
-uv sync
-uv run uvicorn app.main:app --reload --port 8000
-
-# Frontend (second terminal): proxies /api to localhost:8000
-cd frontend
-npm install
-npm run dev            # http://localhost:5173
+cd backend  && uv run uvicorn app.main:app --reload
+cd frontend && uv run streamlit run app.py
 ```
 
-Common tasks:
+Then open:
+- App: http://localhost:8501
+- API docs: http://localhost:8000/docs
+
+## Deploy to AWS
+
+On every push to `main`, GitHub Actions does the following on your EC2 instance:
+**get the code → log in to AWS → build the images → push them to ECR → start the app.**
+
+### 1. AWS setup (one time)
+
+Use the AWS Console, or these AWS CLI commands:
 
 ```bash
-cd backend
-uv add <package>                 # add a dependency (updates pyproject + uv.lock)
-uv run pytest                    # tests
-uv run ruff check . && uv run ruff format .
+# Image registry (ECR)
+aws ecr create-repository --repository-name medical-diagnostics-backend
+aws ecr create-repository --repository-name medical-diagnostics-frontend
 
-cd frontend
-npm test && npm run build
+# S3 bucket for uploaded files (the name must be globally unique)
+aws s3 mb s3://<your-bucket-name>
+
+# IAM user that GitHub Actions and the app will use
+aws iam create-user --user-name medical-diagnostics-demo
+aws iam attach-user-policy --user-name medical-diagnostics-demo \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+aws iam attach-user-policy --user-name medical-diagnostics-demo \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+aws iam create-access-key --user-name medical-diagnostics-demo   # copy AccessKeyId + SecretAccessKey
 ```
 
-## CI/CD (GitHub Actions)
+### 2. EC2 instance
 
-- **CI** (`.github/workflows/ci.yml`) runs on every pull request, on self-hosted runners (configurable with `CI_RUNS_ON`):
-  - backend: `uv sync --locked`, ruff lint and format check, pytest
-  - frontend: `npm ci`, typecheck, vitest, production build
-  - docker: `docker compose build`, starts the stack, smoke-tests `/` and `/api/v1/health` through nginx
-- **CD** (`.github/workflows/cd.yml`) runs on pushes to `main` and on `v*.*.*` tags. It reruns CI, then
-  pushes both images to **Amazon ECR** and deploys them to **EC2** with `docker compose`. All jobs run on a
-  **self-hosted GitHub runner** installed on the EC2 instance, so no SSH access from GitHub is needed.
-  Uploaded files are archived to **S3**. AWS access uses IAM access keys stored in GitHub Secrets.
-  **Setup guide, plus the full list of secrets and variables: [deploy/README.md](deploy/README.md).**
-- **Dependabot** (`.github/dependabot.yml`) opens weekly update PRs for uv, npm, Docker base images and actions.
+- Launch an **Ubuntu** instance (`t3.medium` recommended).
+- In the security group, allow inbound port **8501** (the app) and **22** (SSH, from your IP).
+- Install Docker:
+  ```bash
+  curl -fsSL https://get.docker.com | sudo sh
+  sudo usermod -aG docker ubuntu     # then log out and back in
+  ```
 
-## Changes from the original Flask app
+### 3. Self-hosted GitHub runner (on the EC2 instance)
 
-- Flask → FastAPI, split into layers (routes / schemas / services / dependency injection).
-- conda + `requirements.txt` → uv with `pyproject.toml` and a lockfile.
-- LangChain 0.0.267 / openai 0.28 → current `langchain-openai` / `langchain-chroma`. The default model is
-  `gpt-4o-mini` (configurable), since `gpt-3.5-turbo` is legacy.
-- Chat history is now sent by the client per request, instead of one global server-side memory
-  shared by every user.
-- S3 archival is optional, and missing configuration returns clear errors (for example 503 when there is no OpenAI key).
-- The old `vector_db/` was not migrated, because it was built by chromadb 0.4. Re-upload `data/Diabetes.pdf` to rebuild it.
+In GitHub, go to **Settings → Actions → Runners → New self-hosted runner → Linux**, and run the
+commands it shows on the EC2 instance. Then make the runner start automatically:
+
+```bash
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+### 4. GitHub secrets
+
+In GitHub, go to **Settings → Secrets and variables → Actions → New repository secret**, and add:
+
+| Secret | Value |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | from step 1 |
+| `AWS_SECRET_ACCESS_KEY` | from step 1 |
+| `AWS_REGION` | e.g. `us-east-1` |
+| `S3_BUCKET_NAME` | your bucket name |
+| `OPENAI_API_KEY` | your OpenAI key |
+
+### 5. Deploy
+
+```bash
+git push origin main
+```
+
+Watch it in the **Actions** tab, then open `http://<EC2-public-IP>:8501`.
+
+> This is a demo setup. For production, you would use separate IAM users with fewer
+> permissions, HTTPS, and authentication.
