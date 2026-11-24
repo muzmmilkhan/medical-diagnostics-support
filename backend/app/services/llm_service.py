@@ -17,7 +17,12 @@ Question: {question}"""
 class LLMService:
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.llm = ChatOpenAI(model=Config.OPENAI_MODEL, temperature=0.2, api_key=Config.OPENAI_API_KEY)
+        self.llm = ChatOpenAI(
+            model=Config.OPENAI_MODEL,
+            temperature=0.2,
+            api_key=Config.OPENAI_API_KEY,
+            base_url=Config.BASE_URL,  # None = default OpenAI URL
+        )
 
     def ask(self, question: str) -> tuple[str, list[dict]]:
         # 1. Find the chunks most related to the question

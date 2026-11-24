@@ -10,7 +10,11 @@ from app.config import Config
 class VectorStore:
     def __init__(self):
         embeddings = OpenAIEmbeddings(
-            model=Config.OPENAI_EMBEDDING_MODEL, api_key=Config.OPENAI_API_KEY
+            model=Config.OPENAI_EMBEDDING_MODEL,
+            api_key=Config.OPENAI_API_KEY,
+            base_url=Config.BASE_URL,  # None = default OpenAI URL
+            # Custom endpoints usually expect plain text, not OpenAI token IDs.
+            check_embedding_ctx_length=Config.BASE_URL is None,
         )
         self.db = Chroma(
             collection_name="medical_documents",

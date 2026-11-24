@@ -9,7 +9,9 @@ load_dotenv()
 
 class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    # Optional: use an OpenAI-compatible API (proxy/gateway). Empty or unset = normal OpenAI API.
+    BASE_URL = os.getenv("BASE_URL") or None
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "chat-latest")
     OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
     VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "vector_db")

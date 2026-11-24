@@ -117,6 +117,7 @@ In GitHub, go to **Settings → Secrets and variables → Actions → New reposi
 | `AWS_REGION` | e.g. `us-east-1` |
 | `S3_BUCKET_NAME` | your bucket name |
 | `OPENAI_API_KEY` | your OpenAI key |
+| `BASE_URL` | *optional*: OpenAI-compatible API URL. Skip it to use OpenAI directly |
 
 ### 5. Deploy
 
