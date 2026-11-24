@@ -89,13 +89,61 @@ aws iam create-access-key --user-name medical-diagnostics-demo   # copy AccessKe
 
 ### 2. EC2 instance
 
-- Launch an **Ubuntu** instance (`t3.medium` recommended).
-- In the security group, allow inbound port **8501** (the app) and **22** (SSH, from your IP).
-- Install Docker:
+- Use AWS CLI credentials with EC2 permissions (the demo IAM user from step 1 only has ECR and S3 permissions). Configure the CLI and set your AWS region:
+  ```bash
+  aws configure
+  export AWS_DEFAULT_REGION=us-east-1  # change to your region
+  ```
+- The following commands use the default VPC and create an Ubuntu 24.04 `t3.medium` instance, a key pair, and a security group. SSH is limited to your current public IP; the app port is public:
+  ```bash
+  KEY_NAME=medical-diagnostics-demo
+  aws ec2 create-key-pair --key-name "$KEY_NAME" --query KeyMaterial --output text > "$KEY_NAME.pem"
+  chmod 400 "$KEY_NAME.pem"
+
+  VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
+  SG_ID=$(aws ec2 create-security-group \
+    --group-name medical-diagnostics-demo \
+    --description "Medical diagnostics demo instance" \
+    --vpc-id "$VPC_ID" \
+    --query GroupId --output text)
+  MY_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')
+  aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$MY_IP/32"
+  aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 8501 --cidr 0.0.0.0/0
+
+  # t3.medium is recommended. On a Free Tier account, list the allowed types and pick one:
+  #   aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true \
+  #     --query 'InstanceTypes[].InstanceType' --output text
+  # Use an x86 type (not t4g, which is ARM) because the AMI below is amd64.
+  # On Free Tier, c7i-flex.large (4 GiB) or m7i-flex.large (8 GiB) is closest to t3.medium.
+  INSTANCE_TYPE=t3.medium
+
+  AMI_ID=$(aws ssm get-parameter \
+    --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+    --query Parameter.Value --output text)
+  INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id "$AMI_ID" \
+    --instance-type "$INSTANCE_TYPE" \
+    --key-name "$KEY_NAME" \
+    --security-group-ids "$SG_ID" \
+    --count 1 \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=medical-diagnostics-demo}]' \
+    --query 'Instances[0].InstanceId' --output text)
+  aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+  PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+  echo "Instance: $INSTANCE_ID  Public IP: $PUBLIC_IP"
+  ```
+- Connect over SSH and install Docker:
+  ```bash
+  ssh -i "$KEY_NAME.pem" "ubuntu@$PUBLIC_IP"
+  ```
+  Then run these commands on the EC2 instance:
   ```bash
   curl -fsSL https://get.docker.com | sudo sh
-  sudo usermod -aG docker ubuntu     # then log out and back in
+  sudo usermod -aG docker ubuntu
   ```
+  Reconnect over SSH for the Docker group change to take effect.
+- These commands assume a default VPC. For another VPC, set `VPC_ID` to that VPC's ID and add `--subnet-id <subnet-id>` to `run-instances`. Keep the `.pem` file private; rerun the launch commands only after choosing new names or cleaning up the existing resources.
 
 ### 3. Self-hosted GitHub runner (on the EC2 instance)
 

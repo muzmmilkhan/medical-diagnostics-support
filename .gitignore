@@ -3,3 +3,4 @@
 __pycache__/
 vector_db/
 .DS_Store
+medical-diagnostics-demo.pem
