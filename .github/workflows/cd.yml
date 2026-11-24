@@ -1,7 +1,8 @@
 name: CD
 
-# Build -> push to Amazon ECR -> deploy to EC2 over SSH with docker compose.
-# Required GitHub configuration is documented in deploy/README.md.
+# Build -> push to Amazon ECR -> deploy on EC2 with docker compose.
+# The deploy job runs on a self-hosted runner installed on the EC2 instance itself (label
+# "production"), so no SSH access or SSH keys are needed. See deploy/README.md.
 
 on:
   push:
@@ -29,7 +30,7 @@ jobs:
   publish:
     name: Push ${{ matrix.service }} image to ECR
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","linux"]') }}
     environment: production
     strategy:
       matrix:
@@ -67,7 +68,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./${{ matrix.service }}
-          # Use linux/arm64 for Graviton (t4g, m7g, ...) instances.
+          # Must match the EC2 CPU: linux/amd64 (t3, m6i, ...) or linux/arm64 (Graviton t4g, m7g, ...).
           platforms: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
           push: true
           provenance: false
@@ -77,15 +78,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   deploy:
-    name: Deploy to EC2
+    name: Deploy on EC2
     needs: publish
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    # Must be the runner on the production instance; the stack is started on this machine.
+    runs-on: ${{ fromJSON(vars.DEPLOY_RUNS_ON || '["self-hosted","linux","production"]') }}
     environment: production
-    env:
-      EC2_HOST: ${{ vars.EC2_HOST || secrets.EC2_HOST }}
-      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'medical-diagnostics' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -96,35 +94,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve ECR registry
+      # Logs the local Docker daemon in to ECR; the action logs out again in its post step.
+      - name: Log in to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
         with:
           mask-password: "true"
-
-      - name: Configure SSH
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.EC2_SSH_KNOWN_HOSTS }}
-        run: |
-          : "${EC2_HOST:?Set the EC2_HOST variable}"
-          : "${SSH_PRIVATE_KEY:?Set the EC2_SSH_PRIVATE_KEY secret}"
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          if [ -n "$SSH_KNOWN_HOSTS" ]; then
-            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            ssh-keyscan -T 15 -H "$EC2_HOST" > ~/.ssh/known_hosts
-          fi
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName $EC2_HOST
-            User $EC2_USER
-            IdentityFile ~/.ssh/id_deploy
-            IdentitiesOnly yes
-            ServerAliveInterval 30
-          EOF
 
       - name: Render runtime configuration
         env:
@@ -161,27 +136,32 @@ jobs:
 
       - name: Deploy with docker compose
         env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
         run: |
-          ssh ec2 "mkdir -p '$DEPLOY_PATH'"
-          scp bundle/docker-compose.yml bundle/.env bundle/app.env "ec2:$DEPLOY_PATH/"
-          # A short-lived (12h) ECR token is piped in, so the instance needs no AWS keys to pull.
-          aws ecr get-login-password --region "$AWS_REGION" \
-            | ssh ec2 "docker login --username AWS --password-stdin '$REGISTRY'"
-          ssh ec2 "set -e
-            cd '$DEPLOY_PATH'
-            chmod 600 .env app.env
-            docker compose pull
-            status=0
-            docker compose up -d --remove-orphans --wait --wait-timeout 180 || status=\$?
-            docker logout '$REGISTRY' >/dev/null
-            if [ \$status -ne 0 ]; then docker compose ps; docker compose logs --tail 100; exit \$status; fi
-            docker image prune -af --filter 'until=168h' >/dev/null
-            docker compose ps"
+          # Outside the runner workspace, so workspace cleanup never touches the live config.
+          DEPLOY_DIR="${DEPLOY_PATH:-$HOME/medical-diagnostics}"
+          mkdir -p "$DEPLOY_DIR"
+          install -m 644 bundle/docker-compose.yml "$DEPLOY_DIR/docker-compose.yml"
+          install -m 600 bundle/.env "$DEPLOY_DIR/.env"
+          install -m 600 bundle/app.env "$DEPLOY_DIR/app.env"
+
+          cd "$DEPLOY_DIR"
+          docker compose pull
+          if ! docker compose up -d --remove-orphans --wait --wait-timeout 180; then
+            docker compose ps
+            docker compose logs --tail 100
+            exit 1
+          fi
+          docker compose ps
 
       - name: Verify health
-        run: ssh ec2 "curl -fsS http://localhost/api/v1/health"
+        run: curl -fsS --retry 5 --retry-delay 3 --retry-all-errors http://localhost/api/v1/health
+
+      - name: Prune old images and build cache
+        run: |
+          docker image prune -af --filter "until=168h" >/dev/null
+          docker builder prune -f --filter "until=168h" >/dev/null
 
       - name: Clean up
         if: always()
-        run: rm -rf bundle ~/.ssh/id_deploy
+        run: rm -rf bundle

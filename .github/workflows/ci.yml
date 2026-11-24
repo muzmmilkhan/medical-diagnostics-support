@@ -1,5 +1,8 @@
 name: CI
 
+# Runs on self-hosted runners by default. Set the repository variable CI_RUNS_ON to a JSON
+# label list to change that, e.g. '["self-hosted","linux","builder"]' or '"ubuntu-latest"'.
+
 on:
   pull_request:
   workflow_call: # reused by the CD workflow before publishing images
@@ -15,7 +18,7 @@ concurrency:
 jobs:
   backend:
     name: Backend (lint + test)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","linux"]') }}
     defaults:
       run:
         working-directory: backend
@@ -41,7 +44,7 @@ jobs:
 
   frontend:
     name: Frontend (typecheck + test + build)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","linux"]') }}
     defaults:
       run:
         working-directory: frontend
@@ -61,8 +64,15 @@ jobs:
 
   docker:
     name: Docker build + smoke test
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","linux"]') }}
     needs: [backend, frontend]
+    env:
+      # Isolated from the production stack, which may run on the same self-hosted machine:
+      # a unique project name (so `down -v` can't touch prod containers or volumes) and
+      # host ports that don't collide with prod (:80).
+      COMPOSE_PROJECT_NAME: mdx-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      FRONTEND_PORT: "18080"
+      BACKEND_PORT: "18000"
     steps:
       - uses: actions/checkout@v5
 
@@ -74,8 +84,8 @@ jobs:
 
       - name: Smoke test through the frontend proxy
         run: |
-          curl --fail --silent http://localhost:8080/ | grep -q '<div id="root">'
-          curl --fail --silent http://localhost:8080/api/v1/health | grep -q '"ok"'
+          curl --fail --silent "http://localhost:${FRONTEND_PORT}/" | grep -q '<div id="root">'
+          curl --fail --silent "http://localhost:${FRONTEND_PORT}/api/v1/health" | grep -q '"ok"'
 
       - name: Logs on failure
         if: failure()
@@ -83,4 +93,4 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose down -v
+        run: docker compose down -v --remove-orphans

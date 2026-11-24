@@ -109,6 +109,6 @@ Done. Next:
        S3_BUCKET_NAME=$S3_BUCKET_NAME
        ECR_BACKEND_REPOSITORY=$BACKEND_REPO
        ECR_FRONTEND_REPOSITORY=$FRONTEND_REPO
-  2. Run deploy/github/set-secrets.sh <ec2-key.pem>. It creates access keys for
+  2. Run deploy/github/set-secrets.sh. It creates access keys for
      $CI_USER and $APP_USER and stores them directly in GitHub Secrets.
 DONE

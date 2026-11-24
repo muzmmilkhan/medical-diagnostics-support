@@ -5,13 +5,12 @@
 # Prerequisites: run deploy/aws/bootstrap.sh first; `gh auth login`; admin AWS credentials;
 #                deploy/github/variables.env filled in (copy from variables.env.example).
 #
-# Usage:  deploy/github/set-secrets.sh <path/to/ec2-key.pem>
+# Usage:  deploy/github/set-secrets.sh
 # Env:    SKIP_AWS_KEYS=1  don't create new IAM access keys (e.g. when re-running)
 #         SKIP_APP_KEYS=1  don't create app keys (the EC2 instance profile is used for S3 instead)
 #         PREFIX=...       must match the bootstrap.sh prefix (default: medical-diagnostics)
 set -euo pipefail
 
-KEY_FILE=${1:?usage: $0 <path/to/ec2-ssh-private-key.pem>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 VARS_FILE="$HERE/variables.env"
 PREFIX=${PREFIX:-medical-diagnostics}
@@ -19,22 +18,11 @@ CI_USER=${CI_USER:-$PREFIX-ci}
 APP_USER=${APP_USER:-$PREFIX-app}
 
 [ -f "$VARS_FILE" ] || { echo "Missing $VARS_FILE (copy variables.env.example)" >&2; exit 1; }
-[ -f "$KEY_FILE" ] || { echo "SSH key not found: $KEY_FILE" >&2; exit 1; }
 # shellcheck disable=SC1090
 set -a; source "$VARS_FILE"; set +a
 
 echo "==> Repository variables (from variables.env)"
 gh variable set -f "$VARS_FILE"
-
-echo "==> EC2_SSH_PRIVATE_KEY"
-gh secret set EC2_SSH_PRIVATE_KEY < "$KEY_FILE"
-
-echo "==> EC2_SSH_KNOWN_HOSTS (pins the host key instead of trusting it on first use)"
-if known=$(ssh-keyscan -T 10 -H "$EC2_HOST" 2>/dev/null) && [ -n "$known" ]; then
-  printf '%s\n' "$known" | gh secret set EC2_SSH_KNOWN_HOSTS
-else
-  echo "   could not reach $EC2_HOST; skipped (CD will fall back to ssh-keyscan)"
-fi
 
 echo "==> OPENAI_API_KEY (paste it at the prompt; input is hidden)"
 gh secret set OPENAI_API_KEY

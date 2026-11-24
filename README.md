@@ -97,12 +97,13 @@ npm test && npm run build
 
 ## CI/CD (GitHub Actions)
 
-- **CI** (`.github/workflows/ci.yml`) runs on every pull request:
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request, on self-hosted runners (configurable with `CI_RUNS_ON`):
   - backend: `uv sync --locked`, ruff lint and format check, pytest
   - frontend: `npm ci`, typecheck, vitest, production build
   - docker: `docker compose build`, starts the stack, smoke-tests `/` and `/api/v1/health` through nginx
 - **CD** (`.github/workflows/cd.yml`) runs on pushes to `main` and on `v*.*.*` tags. It reruns CI, then
-  pushes both images to **Amazon ECR** and deploys them to **EC2** with `docker compose` over SSH.
+  pushes both images to **Amazon ECR** and deploys them to **EC2** with `docker compose`. All jobs run on a
+  **self-hosted GitHub runner** installed on the EC2 instance, so no SSH access from GitHub is needed.
   Uploaded files are archived to **S3**. AWS access uses IAM access keys stored in GitHub Secrets.
   **Setup guide, plus the full list of secrets and variables: [deploy/README.md](deploy/README.md).**
 - **Dependabot** (`.github/dependabot.yml`) opens weekly update PRs for uv, npm, Docker base images and actions.
