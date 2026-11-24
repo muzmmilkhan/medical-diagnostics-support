@@ -1,0 +1,35 @@
+# Production stack for EC2. Copied to the instance by the CD workflow as docker-compose.yml.
+# Image references come from .env (written by CD); runtime config/secrets come from app.env.
+name: medical-diagnostics
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
+    env_file:
+      - app.env
+    environment:
+      VECTOR_DB_PATH: /app/vector_db
+    volumes:
+      - vector_db:/app/vector_db
+    restart: unless-stopped
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is required}
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "80:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  # Lives on the instance's EBS volume, so the vector index survives redeploys.
+  vector_db:

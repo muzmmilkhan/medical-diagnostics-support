@@ -8,7 +8,7 @@ are grounded in those documents, with sources cited.
 | ---------- | ---------------------------------------------------------------------- |
 | `backend/` | FastAPI · LangChain · Chroma · OpenAI · optional S3 archival · **uv** |
 | `frontend/`| React 19 · TypeScript · Vite, served by nginx in production            |
-| Infra      | Dockerfiles per service · Docker Compose · GitHub Actions CI/CD → GHCR |
+| Infra      | Dockerfiles per service · Docker Compose · GitHub Actions CI/CD → AWS ECR + EC2 |
 
 ## Project structure
 
@@ -31,6 +31,7 @@ are grounded in those documents, with sources cited.
 │   ├── nginx.conf.template         # serves SPA, proxies /api -> backend
 │   └── Dockerfile
 ├── data/Diabetes.pdf               # sample document
+├── deploy/                       # AWS: prod compose, bootstrap (ECR/S3/IAM), EC2 setup, GitHub secrets
 ├── docker-compose.yml
 ├── .env.example
 └── .github/workflows/{ci,cd}.yml
@@ -101,16 +102,10 @@ npm test && npm run build
   - frontend: `npm ci`, typecheck, vitest, production build
   - docker: `docker compose build`, starts the stack, smoke-tests `/` and `/api/v1/health` through nginx
 - **CD** (`.github/workflows/cd.yml`) runs on pushes to `main` and on `v*.*.*` tags. It reruns CI, then
-  builds multi-arch (amd64/arm64) images and pushes them to GitHub Container Registry:
-  - `ghcr.io/<owner>/<repo>-backend`
-  - `ghcr.io/<owner>/<repo>-frontend`
-  - tags: branch, semver, `sha-…`, and `latest` on `main`
-
-  No extra secrets are needed. It uses the built-in `GITHUB_TOKEN`. A deploy job is left as a stub
-  at the end of `cd.yml` for your target (SSH + compose, ECS, Kubernetes, …).
+  pushes both images to **Amazon ECR** and deploys them to **EC2** with `docker compose` over SSH.
+  Uploaded files are archived to **S3**. AWS access uses IAM access keys stored in GitHub Secrets.
+  **Setup guide, plus the full list of secrets and variables: [deploy/README.md](deploy/README.md).**
 - **Dependabot** (`.github/dependabot.yml`) opens weekly update PRs for uv, npm, Docker base images and actions.
-
-To run the published images, use `BACKEND_IMAGE=ghcr.io/... FRONTEND_IMAGE=ghcr.io/... docker compose up -d --no-build`.
 
 ## Changes from the original Flask app
 

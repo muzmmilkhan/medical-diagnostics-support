@@ -20,3 +20,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Deployment config with real values
+deploy/github/variables.env
+*.pem

@@ -1,5 +1,8 @@
 name: CD
 
+# Build -> push to Amazon ECR -> deploy to EC2 over SSH with docker compose.
+# Required GitHub configuration is documented in deploy/README.md.
+
 on:
   push:
     branches: [main]
@@ -13,55 +16,172 @@ concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Non-sensitive settings: read from repository *variables*, falling back to secrets.
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
+  ECR_BACKEND_REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY || 'medical-diagnostics-backend' }}
+  ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY || 'medical-diagnostics-frontend' }}
+
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Publish ${{ matrix.service }} image
+    name: Push ${{ matrix.service }} image to ECR
     needs: ci
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    environment: production
     strategy:
       matrix:
         service: [backend, frontend]
     steps:
       - uses: actions/checkout@v5
 
+      - name: Configure AWS credentials (CI deploy IAM user)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: "true"
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}-${{ matrix.service }}
+          images: ${{ steps.ecr.outputs.registry }}/${{ matrix.service == 'backend' && env.ECR_BACKEND_REPOSITORY || env.ECR_FRONTEND_REPOSITORY }}
           tags: |
-            type=ref,event=branch
+            type=raw,value=${{ github.sha }}
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: ./${{ matrix.service }}
-          platforms: linux/amd64,linux/arm64
+          # Use linux/arm64 for Graviton (t4g, m7g, ...) instances.
+          platforms: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
           push: true
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  # Add a deploy job here once a target is chosen (e.g. SSH + `docker compose pull && up -d`,
-  # ECS, Kubernetes). It should `needs: publish` and use a protected GitHub environment.
+  deploy:
+    name: Deploy to EC2
+    needs: publish
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      EC2_HOST: ${{ vars.EC2_HOST || secrets.EC2_HOST }}
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'medical-diagnostics' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (CI deploy IAM user)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve ECR registry
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: "true"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.EC2_SSH_KNOWN_HOSTS }}
+        run: |
+          : "${EC2_HOST:?Set the EC2_HOST variable}"
+          : "${SSH_PRIVATE_KEY:?Set the EC2_SSH_PRIVATE_KEY secret}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -T 15 -H "$EC2_HOST" > ~/.ssh/known_hosts
+          fi
+          cat >> ~/.ssh/config <<EOF
+          Host ec2
+            HostName $EC2_HOST
+            User $EC2_USER
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Render runtime configuration
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          S3_BUCKET_NAME: ${{ vars.S3_BUCKET_NAME || secrets.S3_BUCKET_NAME }}
+          APP_AWS_ACCESS_KEY_ID: ${{ secrets.APP_AWS_ACCESS_KEY_ID }}
+          APP_AWS_SECRET_ACCESS_KEY: ${{ secrets.APP_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          : "${OPENAI_API_KEY:?Set the OPENAI_API_KEY secret}"
+          umask 077
+          mkdir -p bundle
+          cp deploy/docker-compose.prod.yml bundle/docker-compose.yml
+
+          # Compose interpolation: which images to run.
+          {
+            echo "BACKEND_IMAGE=${REGISTRY}/${ECR_BACKEND_REPOSITORY}:${GITHUB_SHA}"
+            echo "FRONTEND_IMAGE=${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:${GITHUB_SHA}"
+          } > bundle/.env
+
+          # Backend container environment.
+          {
+            echo "ENVIRONMENT=production"
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
+            echo "AWS_REGION=${AWS_REGION}"
+            [ -n "$OPENAI_MODEL" ] && echo "OPENAI_MODEL=${OPENAI_MODEL}"
+            [ -n "$S3_BUCKET_NAME" ] && echo "S3_BUCKET_NAME=${S3_BUCKET_NAME}"
+            # Omit the app keys to fall back to the EC2 instance profile (IAM role).
+            [ -n "$APP_AWS_ACCESS_KEY_ID" ] && echo "AWS_ACCESS_KEY_ID=${APP_AWS_ACCESS_KEY_ID}"
+            [ -n "$APP_AWS_SECRET_ACCESS_KEY" ] && echo "AWS_SECRET_ACCESS_KEY=${APP_AWS_SECRET_ACCESS_KEY}"
+            true
+          } > bundle/app.env
+
+      - name: Deploy with docker compose
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          ssh ec2 "mkdir -p '$DEPLOY_PATH'"
+          scp bundle/docker-compose.yml bundle/.env bundle/app.env "ec2:$DEPLOY_PATH/"
+          # A short-lived (12h) ECR token is piped in, so the instance needs no AWS keys to pull.
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | ssh ec2 "docker login --username AWS --password-stdin '$REGISTRY'"
+          ssh ec2 "set -e
+            cd '$DEPLOY_PATH'
+            chmod 600 .env app.env
+            docker compose pull
+            status=0
+            docker compose up -d --remove-orphans --wait --wait-timeout 180 || status=\$?
+            docker logout '$REGISTRY' >/dev/null
+            if [ \$status -ne 0 ]; then docker compose ps; docker compose logs --tail 100; exit \$status; fi
+            docker image prune -af --filter 'until=168h' >/dev/null
+            docker compose ps"
+
+      - name: Verify health
+        run: ssh ec2 "curl -fsS http://localhost/api/v1/health"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf bundle ~/.ssh/id_deploy
